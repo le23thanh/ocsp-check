@@ -4,6 +4,8 @@ CLI (Command-Line-Interface) Tool to check the OCSP status of a .p12/.mobileprov
 
 Version: `1.1`
 
+⚠️ **Warning: the script has no security such as sanitization and else, you will need to implement the security if you make a online tool out of this.**
+
 ___
 
 ## Usage:
