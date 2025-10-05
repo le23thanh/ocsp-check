@@ -13,9 +13,9 @@ ___
 ## Credits:
 - me
   programmed this
-  
+
 - lscs3 
-  Had the idea for this
+  Had the idea for this (https://t.me/JacksonThinking)
 
 ## Usage:
 
