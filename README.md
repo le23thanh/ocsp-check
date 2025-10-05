@@ -60,7 +60,7 @@ ___
 
 There is also a type called **info** use it like this:
 
-`./tool.sh --type info --p12 Cert.p12 --mp Profile.mobileprovision --password 123456 --json`
+`./tool.sh --type info --p12 Cert.p12 --mp Profile.mobileprovision --password 123456 --json --prettify-json`
 
 **Output:**
 
