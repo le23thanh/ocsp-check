@@ -2,11 +2,12 @@
 set -e
 
 usage() {
-    echo "Usage: $0 [--json] [--password <password>] --type <ocsp|info> --p12 <file.p12> --mp <file.mobileprovision>"
+    echo "Usage: $0 [--json] [--prettify-json] [--password <password>] --type <ocsp|info> --p12 <file.p12> --mp <file.mobileprovision>"
     exit 1
 }
 
 JSON_MODE=false
+PRETTY_JSON=false
 P12_FILE=""
 MP_FILE=""
 PASSWORD=""
@@ -15,6 +16,7 @@ TYPE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --json) JSON_MODE=true; shift ;;
+        --prettify-json) PRETTY_JSON=true; shift ;;
         --password) PASSWORD="$2"; shift 2 ;;
         --type) TYPE="$2"; shift 2 ;;
         --p12) P12_FILE="$2"; shift 2 ;;
@@ -30,8 +32,8 @@ done
 RANDOM_FOLDER="certificates/$(openssl rand -hex 8)"
 mkdir -p "$RANDOM_FOLDER"
 
-[[ "$JSON_MODE" == true ]] && echo "{"
-FIRST=true
+# Collect all JSON outputs in a temporary file if in JSON mode
+JSON_OUTPUT=""
 
 if [[ -n "$P12_FILE" && -f "$P12_FILE" ]]; then
     openssl pkcs12 -legacy -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null || \
@@ -39,7 +41,6 @@ if [[ -n "$P12_FILE" && -f "$P12_FILE" ]]; then
     
     if [[ "$TYPE" == "ocsp" ]]; then
         OCSP_URL=$(openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -ocsp_uri)
-        
         curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer"
         openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem"
         
@@ -49,7 +50,7 @@ if [[ -n "$P12_FILE" && -f "$P12_FILE" ]]; then
         NEXT_UPDATE=$(echo "$OCSP_OUTPUT" | grep "Next Update:" | sed 's/.*Next Update: //')
         
         if [[ "$JSON_MODE" == true ]]; then
-            echo "  \"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
+            JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
         else
             echo "P12 OCSP: $STATUS | $OCSP_URL"
         fi
@@ -107,22 +108,22 @@ ext_key_usage = re.search(r'X509v3 Extended Key Usage:.*?\n\s+(.+)', cert_text)
 if ext_key_usage:
     data['extended_key_usage'] = ext_key_usage.group(1).strip()
 
-if len(sys.argv) > 2 and sys.argv[2] == 'true':
-    print("  \"p12\":", json.dumps(data))
-else:
-    for k, v in data.items():
-        print(f"{k}: {v}")
+# Output only the inner data object as JSON for bash to assemble
+print(json.dumps(data))
 PYEND
 
-        python3 "$RANDOM_FOLDER/parse_cert.py" "$RANDOM_FOLDER/p12_full.txt" "$JSON_MODE"
+        P12_DATA=$(python3 "$RANDOM_FOLDER/parse_cert.py" "$RANDOM_FOLDER/p12_full.txt")
+        
+        if [[ "$JSON_MODE" == true ]]; then
+            JSON_OUTPUT="\"p12\": $P12_DATA"
+        else
+            echo "$P12_DATA" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+        fi
     fi
-    FIRST=false
 fi
 
 if [[ -n "$MP_FILE" && -f "$MP_FILE" ]]; then
     security cms -D -i "$MP_FILE" > "$RANDOM_FOLDER/profile.plist"
-    
-    [[ "$JSON_MODE" == true && "$FIRST" == false ]] && echo "  ,"
     
     if [[ "$TYPE" == "ocsp" ]]; then
         CERT_BASE64=$(plutil -extract DeveloperCertificates.0 xml1 -o - "$RANDOM_FOLDER/profile.plist" | xmllint --xpath "string(//data)" -)
@@ -136,7 +137,8 @@ if [[ -n "$MP_FILE" && -f "$MP_FILE" ]]; then
         STATUS=$(echo "$OCSP_OUTPUT" | grep -o "mp.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
         
         if [[ "$JSON_MODE" == true ]]; then
-            echo "  \"mobileprovision\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\"}"
+            [[ -n "$JSON_OUTPUT" ]] && JSON_OUTPUT+=", "
+            JSON_OUTPUT+="\"mobileprovision\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\"}"
         else
             echo "MP OCSP: $STATUS | $OCSP_URL"
         fi
@@ -150,7 +152,7 @@ try:
     with open(sys.argv[1], 'rb') as f:
         plist = plistlib.load(f)
 except:
-    print("{}" if len(sys.argv) > 2 and sys.argv[2] == 'true' else "")
+    print("{}")
     sys.exit(0)
 
 data = {}
@@ -172,15 +174,27 @@ for key, value in plist.items():
             if isinstance(v, (str, int, bool)):
                 data[sub_key] = v
 
-if len(sys.argv) > 2 and sys.argv[2] == 'true':
-    print("  \"mobileprovision\":", json.dumps(data, default=str))
-else:
-    for k, v in data.items():
-        print(f"{k}: {v}")
+# Output only the inner data object as JSON for bash to assemble
+print(json.dumps(data, default=str))
 PYEND
 
-        python3 "$RANDOM_FOLDER/parse_plist.py" "$RANDOM_FOLDER/profile.plist" "$JSON_MODE"
+        MP_DATA=$(python3 "$RANDOM_FOLDER/parse_plist.py" "$RANDOM_FOLDER/profile.plist")
+        
+        if [[ "$JSON_MODE" == true ]]; then
+            [[ -n "$JSON_OUTPUT" ]] && JSON_OUTPUT+=", "
+            JSON_OUTPUT+="\"mobileprovision\": $MP_DATA"
+        else
+            echo "$MP_DATA" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+        fi
     fi
 fi
 
-[[ "$JSON_MODE" == true ]] && echo "}"
+# Final JSON output assembly and optional prettification
+if [[ "$JSON_MODE" == true ]]; then
+    FINAL_JSON="{$JSON_OUTPUT}"
+    if [[ "$PRETTY_JSON" == true ]]; then
+        echo "$FINAL_JSON" | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))'
+    else
+        echo "$FINAL_JSON"
+    fi
+fi

@@ -2,13 +2,13 @@
 
 CLI (Command-Line-Interface) Tool to check the OCSP status of a .p12/.mobileprovision file.
 
-Version: `1.0`
+Version: `1.1`
 
 ___
 
 ## Usage:
 
-`Usage: ./tool.sh [--json] [--password <password>] --type <ocsp|info> --p12 <file.p12> --mp <file.mobileprovision>`
+`Usage: ./tool.sh [--json] [--prettify-json] [--password <password>] --type <ocsp|info> --p12 <file.p12> --mp <file.mobileprovision>`
 
 ## Requirements:
 
@@ -35,7 +35,7 @@ ___
 
 - **Copy/Download/Clone** the .sh file into your System (Use the iSH app for iOS, Termux for Android)
 - Run `chmod +x tool.sh` to give the Script Permission to run
-- Run any command you want to example: `./tool.sh --type ocsp --p12 Cert.p12 --mp Profile.mobileprovision --password 123456 --json`
+- Run any command you want to example: `./tool.sh --type ocsp --p12 Cert.p12 --mp Profile.mobileprovision --password 123456 --json --prettify-json`
 
 **Output:**
 
