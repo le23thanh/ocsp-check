@@ -24,6 +24,7 @@ ___
 ## Requirements:
 
 - **OpenSSL & Python & Cryptography Library**
+Cryptography isn't required on Linux since only MacOS uses it now in this tool, it's still okay to install it.
   
 > `sudo apt install openssl python3 python3-cryptography` (Debian/Ubuntu)
 >
