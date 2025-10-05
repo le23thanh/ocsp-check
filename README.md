@@ -10,6 +10,13 @@ Version: `1.1`
 
 ___
 
+## Credits:
+- me
+  programmed this
+  
+- lscs3 
+  Had the idea for this
+
 ## Usage:
 
 `Usage: ./tool.sh [--json] [--prettify-json] [--password <password>] --type <ocsp|info> --p12 <file.p12> --mp <file.mobileprovision>`
