@@ -6,6 +6,8 @@ Version: `1.1`
 
 ⚠️ **Warning: the script has no security such as sanitization and else, you will need to implement the security if you make an online tool out of this.**
 
+**THE SCRIPT WILL CRYPTO GENERATE IN THE "certificates" FOLDER**
+
 ___
 
 ## Usage:
