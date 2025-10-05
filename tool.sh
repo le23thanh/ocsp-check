@@ -272,8 +272,8 @@ PYEND
                 else
                     echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
                 fi
-            else
-                echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"Error: {d.get(\"error\", \"Unknown error\")}")'
+           else
+                echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print("Error:", d.get("error", "Unknown error"))'
             fi
         fi
     else
@@ -325,18 +325,46 @@ PYEND
                     openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem" 2>/dev/null || true
                 fi
                 
-                # Perform OCSP check
+              # Perform OCSP check
                 OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/p12.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
                 STATUS=$(echo "$OCSP_OUTPUT" | grep -o "p12.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
                 THIS_UPDATE=$(echo "$OCSP_OUTPUT" | grep "This Update:" | sed 's/.*This Update: //')
                 NEXT_UPDATE=$(echo "$OCSP_OUTPUT" | grep "Next Update:" | sed 's/.*Next Update: //')
+                REVOKED_TIME=$(echo "$OCSP_OUTPUT" | grep "Revocation Time:" | sed 's/.*Revocation Time: //')
                 
                 if [[ "$JSON_MODE" == true ]]; then
-                    JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
-                else
+                    JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\""
+                    
+                    if [[ -n "$REVOKED_TIME" ]]; then
+                        JSON_OUTPUT="${JSON_OUTPUT}, \"revocation_time\": \"$REVOKED_TIME\""
+                        
+                        # Determine who revoked
+                        REVOKED_BY="Unknown"
+                        if echo "$OCSP_OUTPUT" | grep -q "keyCompromise"; then
+                            REVOKED_BY="Certificate holder (key compromised)"
+                        elif echo "$OCSP_OUTPUT" | grep -q "cessationOfOperation"; then
+                            REVOKED_BY="Certificate holder (ceased operations)"
+                        elif echo "$OCSP_OUTPUT" | grep -q "superseded"; then
+                            REVOKED_BY="Certificate holder (superseded by new certificate)"
+                        elif echo "$OCSP_OUTPUT" | grep -q "affiliationChanged"; then
+                            REVOKED_BY="Apple (affiliation changed)"
+                        elif echo "$OCSP_OUTPUT" | grep -q "certificateHold"; then
+                            REVOKED_BY="Apple (temporary hold)"
+                        elif echo "$OCSP_OUTPUT" | grep -q "privilegeWithdrawn"; then
+                            REVOKED_BY="Apple (privileges withdrawn)"
+                        else
+                            REVOKED_BY="Apple or certificate holder (reason not specified)"
+                        fi
+                        
+                        JSON_OUTPUT="${JSON_OUTPUT}, \"revoked_by\": \"$REVOKED_BY\""
+                    fi
+                    
+                    JSON_OUTPUT="${JSON_OUTPUT}}"
+               else
                     echo "P12 OCSP: $STATUS | $OCSP_URL"
                     [[ -n "$THIS_UPDATE" ]] && echo "  This Update: $THIS_UPDATE"
                     [[ -n "$NEXT_UPDATE" ]] && echo "  Next Update: $NEXT_UPDATE"
+                    [[ -n "$REVOKED_TIME" ]] && echo "  Revocation Time: $REVOKED_TIME"
                 fi
             fi
         else
@@ -497,4 +525,4 @@ if [[ "$JSON_MODE" == true ]]; then
 fi
 
 # Cleanup
-rm -rf "$RANDOM_FOLDER"
+rm -rf "$RANDOM_FOLDER" 
