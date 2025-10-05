@@ -2,7 +2,7 @@
 set -e
 
 usage() {
-    echo "Usage: $0 [--json] [--prettify-json] [--password <password>] --type <ocsp|info> --p12 <file.p12> --mp <file.mobileprovision>"
+    echo "Usage: $0 [--json] [--prettify-json] [--password <password>] --type <ocsp|info> --p12 <file.p12> [--mp <file.mobileprovision>]"
     exit 1
 }
 
@@ -49,14 +49,19 @@ import sys
 import subprocess
 import json
 import warnings
+import traceback
 warnings.filterwarnings('ignore')
 
-from cryptography.hazmat.primitives.serialization import pkcs12, Encoding
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
-from cryptography.x509.oid import ExtensionOID, AuthorityInformationAccessOID
-import tempfile
-import os
+try:
+    from cryptography.hazmat.primitives.serialization import pkcs12, Encoding
+    from cryptography import x509
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.x509.oid import ExtensionOID, AuthorityInformationAccessOID
+    import tempfile
+    import os
+except ImportError as e:
+    print(json.dumps({'error': f'Missing required library: {str(e)}. Install with: pip3 install cryptography'}))
+    sys.exit(0)
 
 def get_ocsp_url(cert):
     try:
@@ -128,19 +133,36 @@ def check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex):
 
 try:
     p12_file = sys.argv[1]
-    password = sys.argv[2].encode() if len(sys.argv) > 2 and sys.argv[2] else b''
+    password = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ''
     check_type = sys.argv[3] if len(sys.argv) > 3 else 'ocsp'
     
-    with open(p12_file, 'rb') as f:
-        p12_data = f.read()
+    # Read P12 file
+    try:
+        with open(p12_file, 'rb') as f:
+            p12_data = f.read()
+    except Exception as e:
+        print(json.dumps({'error': f'Cannot read P12 file: {str(e)}'}))
+        sys.exit(0)
     
-    private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
-        p12_data, password, default_backend()
-    )
+    # Try to load P12 with password
+    password_bytes = password.encode('utf-8')
+    try:
+        private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
+            p12_data, password_bytes, default_backend()
+        )
+    except Exception as e:
+        # Try with empty password
+        try:
+            private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
+                p12_data, None, default_backend()
+            )
+        except Exception as e2:
+            print(json.dumps({'error': f'Cannot decrypt P12 file. Wrong password? Original error: {str(e)}'}))
+            sys.exit(0)
     
     if not certificate:
         print(json.dumps({'error': 'No certificate found in P12 file'}))
-        sys.exit(1)
+        sys.exit(0)
     
     cert_pem = certificate.public_bytes(Encoding.PEM).decode('utf-8')
     serial_hex = format(certificate.serial_number, 'x')
@@ -149,17 +171,21 @@ try:
         ocsp_url = get_ocsp_url(certificate)
         if not ocsp_url:
             print(json.dumps({'error': 'No OCSP URL found in certificate'}))
-            sys.exit(1)
+            sys.exit(0)
         
         issuer_url = get_issuer_url(certificate)
         if not issuer_url:
             print(json.dumps({'error': 'No issuer URL found in certificate'}))
-            sys.exit(1)
+            sys.exit(0)
         
         import urllib.request
-        issuer_der = urllib.request.urlopen(issuer_url).read()
-        issuer_cert = x509.load_der_x509_certificate(issuer_der, default_backend())
-        issuer_pem = issuer_cert.public_bytes(Encoding.PEM).decode('utf-8')
+        try:
+            issuer_der = urllib.request.urlopen(issuer_url).read()
+            issuer_cert = x509.load_der_x509_certificate(issuer_der, default_backend())
+            issuer_pem = issuer_cert.public_bytes(Encoding.PEM).decode('utf-8')
+        except Exception as e:
+            print(json.dumps({'error': f'Cannot download issuer certificate: {str(e)}'}))
+            sys.exit(0)
         
         ocsp_result = check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex)
         
@@ -229,54 +255,89 @@ try:
         print(json.dumps(result))
         
 except Exception as e:
-    print(json.dumps({'error': str(e)}))
-    sys.exit(1)
+    error_msg = f'Unexpected error: {str(e)}\n{traceback.format_exc()}'
+    print(json.dumps({'error': error_msg}))
+    sys.exit(0)
 PYEND
 
-        if [[ "$TYPE" == "ocsp" ]]; then
-            P12_RESULT=$(python3 "$RANDOM_FOLDER/check_p12.py" "$P12_FILE" "$PASSWORD" "ocsp" 2>&1)
-            
-            if echo "$P12_RESULT" | python3 -c "import sys, json; d=json.loads(sys.stdin.read()); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
-                if [[ "$JSON_MODE" == true ]]; then
-                    JSON_OUTPUT="\"p12\": $P12_RESULT"
-                else
-                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"P12 OCSP: {d.get(\"status\", \"unknown\")} | {d.get(\"ocsp_url\", \"N/A\")}"); print(f"  Serial: {d.get(\"serial\", \"N/A\")}"); d.get("this_update") and print(f"  This Update: {d[\"this_update\"]}"); d.get("next_update") and print(f"  Next Update: {d[\"next_update\"]}"); d.get("revocation_time") and print(f"  Revocation Time: {d[\"revocation_time\"]}"); d.get("revoked_by") and print(f"  Revoked By: {d[\"revoked_by\"]}")'
-                fi
-            else
-                if [[ "$JSON_MODE" == true ]]; then
-                    JSON_OUTPUT="\"p12\": $P12_RESULT"
-                else
-                    echo "Error: $P12_RESULT"
-                fi
-            fi
+        P12_RESULT=$(python3 "$RANDOM_FOLDER/check_p12.py" "$P12_FILE" "$PASSWORD" "$TYPE" 2>&1)
+        
+        if [[ "$JSON_MODE" == true ]]; then
+            JSON_OUTPUT="\"p12\": $P12_RESULT"
         else
-            P12_RESULT=$(python3 "$RANDOM_FOLDER/check_p12.py" "$P12_FILE" "$PASSWORD" "info" 2>&1)
-            
-            if [[ "$JSON_MODE" == true ]]; then
-                JSON_OUTPUT="\"p12\": $P12_RESULT"
+            # Check if it's an error or success
+            if echo "$P12_RESULT" | python3 -c "import sys, json; d=json.loads(sys.stdin.read()); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
+                if [[ "$TYPE" == "ocsp" ]]; then
+                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"P12 OCSP: {d.get(\"status\", \"unknown\")} | {d.get(\"ocsp_url\", \"N/A\")}"); print(f"  Serial: {d.get(\"serial\", \"N/A\")}"); d.get("this_update") and print(f"  This Update: {d[\"this_update\"]}"); d.get("next_update") and print(f"  Next Update: {d[\"next_update\"]}"); d.get("revocation_time") and print(f"  Revocation Time: {d[\"revocation_time\"]}"); d.get("revoked_by") and print(f"  Revoked By: {d[\"revoked_by\"]}")'
+                else
+                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+                fi
             else
-                echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+                echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"Error: {d.get(\"error\", \"Unknown error\")}")'
             fi
         fi
     else
-        # Linux: Use original OpenSSL approach
-        openssl pkcs12 -legacy -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null || \
-        openssl pkcs12 -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null
+     # Linux: Use original OpenSSL approach with better error handling
+        # Try simple extraction first, then with -legacy
+        if ! openssl pkcs12 -in "$P12_FILE" -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null; then
+            if ! openssl pkcs12 -legacy -in "$P12_FILE" -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null; then
+                # Try with empty password
+                if ! openssl pkcs12 -in "$P12_FILE" -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:" 2>/dev/null; then
+                    if [[ "$JSON_MODE" == true ]]; then
+                        JSON_OUTPUT="\"p12\": {\"error\": \"Cannot decrypt P12 file. Wrong password?\"}"
+                    else
+                        echo "Error: Cannot decrypt P12 file. Wrong password?"
+                    fi
+                    rm -rf "$RANDOM_FOLDER"
+                    [[ "$JSON_MODE" == true ]] && echo "{$JSON_OUTPUT}"
+                    exit 1
+                fi
+            fi
+        fi
+        
+        # Verify certificate was extracted
+        if [[ ! -s "$RANDOM_FOLDER/p12.pem" ]] || ! grep -q "BEGIN CERTIFICATE" "$RANDOM_FOLDER/p12.pem"; then
+            if [[ "$JSON_MODE" == true ]]; then
+                JSON_OUTPUT="\"p12\": {\"error\": \"No certificate found in P12 file\"}"
+            else
+                echo "Error: No certificate found in P12 file"
+            fi
+            rm -rf "$RANDOM_FOLDER"
+            [[ "$JSON_MODE" == true ]] && echo "{$JSON_OUTPUT}"
+            exit 1
+        fi
         
         if [[ "$TYPE" == "ocsp" ]]; then
             OCSP_URL=$(openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -ocsp_uri)
-            curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer"
-            openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem"
             
-            OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/p12.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
-            STATUS=$(echo "$OCSP_OUTPUT" | grep -o "p12.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
-            THIS_UPDATE=$(echo "$OCSP_OUTPUT" | grep "This Update:" | sed 's/.*This Update: //')
-            NEXT_UPDATE=$(echo "$OCSP_OUTPUT" | grep "Next Update:" | sed 's/.*Next Update: //')
-            
-            if [[ "$JSON_MODE" == true ]]; then
-                JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
+            if [[ -z "$OCSP_URL" ]]; then
+                if [[ "$JSON_MODE" == true ]]; then
+                    JSON_OUTPUT="\"p12\": {\"error\": \"No OCSP URL found in certificate\"}"
+                else
+                    echo "Error: No OCSP URL found in certificate"
+                fi
             else
-                echo "P12 OCSP: $STATUS | $OCSP_URL"
+                # Download issuer certificate
+                curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer" || \
+                curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG2.cer"
+                
+                if [[ -f "$RANDOM_FOLDER/issuer.cer" ]]; then
+                    openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem" 2>/dev/null || true
+                fi
+                
+                # Perform OCSP check
+                OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/p12.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
+                STATUS=$(echo "$OCSP_OUTPUT" | grep -o "p12.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
+                THIS_UPDATE=$(echo "$OCSP_OUTPUT" | grep "This Update:" | sed 's/.*This Update: //')
+                NEXT_UPDATE=$(echo "$OCSP_OUTPUT" | grep "Next Update:" | sed 's/.*Next Update: //')
+                
+                if [[ "$JSON_MODE" == true ]]; then
+                    JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
+                else
+                    echo "P12 OCSP: $STATUS | $OCSP_URL"
+                    [[ -n "$THIS_UPDATE" ]] && echo "  This Update: $THIS_UPDATE"
+                    [[ -n "$NEXT_UPDATE" ]] && echo "  Next Update: $NEXT_UPDATE"
+                fi
             fi
         else
             openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -text > "$RANDOM_FOLDER/p12_full.txt"
@@ -347,24 +408,37 @@ PYEND
 fi
 
 if [[ -n "$MP_FILE" && -f "$MP_FILE" ]]; then
-    security cms -D -i "$MP_FILE" > "$RANDOM_FOLDER/profile.plist"
-    
-    if [[ "$TYPE" == "ocsp" ]]; then
-        CERT_BASE64=$(plutil -extract DeveloperCertificates.0 xml1 -o - "$RANDOM_FOLDER/profile.plist" | xmllint --xpath "string(//data)" -)
-        echo "$CERT_BASE64" | base64 -d > "$RANDOM_FOLDER/mp.pem"
-        
-        OCSP_URL=$(openssl x509 -in "$RANDOM_FOLDER/mp.pem" -noout -ocsp_uri)
-        curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer"
-        openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem"
-        
-        OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/mp.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
-        STATUS=$(echo "$OCSP_OUTPUT" | grep -o "mp.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
-        
+    security cms -D -i "$MP_FILE" > "$RANDOM_FOLDER/profile.plist" 2>/dev/null || {
         if [[ "$JSON_MODE" == true ]]; then
             [[ -n "$JSON_OUTPUT" ]] && JSON_OUTPUT+=", "
-            JSON_OUTPUT+="\"mobileprovision\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\"}"
+            JSON_OUTPUT+="\"mobileprovision\": {\"error\": \"Cannot decode mobileprovision file\"}"
         else
-            echo "MP OCSP: $STATUS | $OCSP_URL"
+            echo "Error: Cannot decode mobileprovision file"
+        fi
+        MP_FILE=""
+    }
+fi
+
+if [[ -n "$MP_FILE" && -f "$RANDOM_FOLDER/profile.plist" ]]; then
+    if [[ "$TYPE" == "ocsp" ]]; then
+        CERT_BASE64=$(plutil -extract DeveloperCertificates.0 xml1 -o - "$RANDOM_FOLDER/profile.plist" 2>/dev/null | xmllint --xpath "string(//data)" - 2>/dev/null)
+        
+        if [[ -n "$CERT_BASE64" ]]; then
+            echo "$CERT_BASE64" | base64 -d > "$RANDOM_FOLDER/mp.pem" 2>/dev/null
+            
+            OCSP_URL=$(openssl x509 -in "$RANDOM_FOLDER/mp.pem" -noout -ocsp_uri 2>/dev/null)
+            curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer"
+            openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem" 2>/dev/null
+            
+            OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/mp.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
+            STATUS=$(echo "$OCSP_OUTPUT" | grep -o "mp.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
+            
+            if [[ "$JSON_MODE" == true ]]; then
+                [[ -n "$JSON_OUTPUT" ]] && JSON_OUTPUT+=", "
+                JSON_OUTPUT+="\"mobileprovision\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\"}"
+            else
+                echo "MP OCSP: $STATUS | $OCSP_URL"
+            fi
         fi
     else
         cat > "$RANDOM_FOLDER/parse_plist.py" << 'PYEND'
@@ -414,10 +488,13 @@ fi
 
 # Final JSON output assembly and optional prettification
 if [[ "$JSON_MODE" == true ]]; then
-    FINAL_JSON="{$JSON_OUTPUT}"
+    FINAL_JSON="{${JSON_OUTPUT:-}}"
     if [[ "$PRETTY_JSON" == true ]]; then
         echo "$FINAL_JSON" | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))'
     else
         echo "$FINAL_JSON"
     fi
 fi
+
+# Cleanup
+rm -rf "$RANDOM_FOLDER"
