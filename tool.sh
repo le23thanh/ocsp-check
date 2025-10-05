@@ -41,48 +41,9 @@ fi
 # Collect all JSON outputs in a temporary file if in JSON mode
 JSON_OUTPUT=""
 
-# Function to determine revocation reason/source
-get_revocation_info() {
-    local ocsp_output=$1
-    local revocation_reason=""
-    local revoked_by="Unknown"
-    
-    if echo "$ocsp_output" | grep -q "Revocation Reason:"; then
-        revocation_reason=$(echo "$ocsp_output" | grep "Revocation Reason:" | sed 's/.*Revocation Reason: //')
-        
-        case "$revocation_reason" in
-            *"keyCompromise"*|*"Key Compromise"*)
-                revoked_by="Certificate holder (key compromised)"
-                ;;
-            *"cessationOfOperation"*|*"Cessation"*)
-                revoked_by="Certificate holder (ceased operations)"
-                ;;
-            *"superseded"*|*"Superseded"*)
-                revoked_by="Certificate holder (superseded by new certificate)"
-                ;;
-            *"affiliationChanged"*|*"Affiliation"*)
-                revoked_by="Apple (affiliation changed)"
-                ;;
-            *"certificateHold"*|*"Certificate Hold"*)
-                revoked_by="Apple (temporary hold)"
-                ;;
-            *"privilegeWithdrawn"*|*"Privilege Withdrawn"*)
-                revoked_by="Apple (privileges withdrawn)"
-                ;;
-            *)
-                revoked_by="Apple or certificate holder"
-                ;;
-        esac
-    elif echo "$ocsp_output" | grep -q "revoked"; then
-        revoked_by="Apple or certificate holder (reason not specified)"
-    fi
-    
-    echo "$revoked_by"
-}
-
 if [[ -n "$P12_FILE" && -f "$P12_FILE" ]]; then
     if [[ "$IS_MACOS" == true ]]; then
-        # macOS: Use Python to extract and check OCSP
+        # macOS: Use Python cryptography library
         cat > "$RANDOM_FOLDER/check_p12.py" << 'PYEND'
 import sys
 import subprocess
@@ -127,7 +88,6 @@ def check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex):
         issuer_path = issuer_file.name
     
     try:
-        # Try with serial number first
         result = subprocess.run(
             ['openssl', 'ocsp', '-issuer', issuer_path, '-serial', f'0x{serial_hex}', 
              '-url', ocsp_url, '-CAfile', issuer_path, '-no_nonce'],
@@ -143,7 +103,6 @@ def check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex):
         else:
             status = 'unknown'
         
-        # Extract timestamps
         this_update = ''
         next_update = ''
         revoked_time = ''
@@ -197,13 +156,11 @@ try:
             print(json.dumps({'error': 'No issuer URL found in certificate'}))
             sys.exit(1)
         
-        # Download issuer certificate
         import urllib.request
         issuer_der = urllib.request.urlopen(issuer_url).read()
         issuer_cert = x509.load_der_x509_certificate(issuer_der, default_backend())
         issuer_pem = issuer_cert.public_bytes(Encoding.PEM).decode('utf-8')
         
-        # Check OCSP
         ocsp_result = check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex)
         
         result = {
@@ -217,7 +174,6 @@ try:
         if ocsp_result['revoked_time']:
             result['revocation_time'] = ocsp_result['revoked_time']
         
-        # Determine who revoked the certificate
         if ocsp_result['status'] == 'revoked':
             raw_output = ocsp_result['raw_output']
             revoked_by = "Unknown"
@@ -244,7 +200,6 @@ try:
         
         print(json.dumps(result))
     else:
-        # Info mode
         subject_dict = {}
         for attr in certificate.subject:
             key = attr.oid._name.lower().replace(' ', '_')
@@ -260,7 +215,6 @@ try:
             'not_after': str(certificate.not_valid_after_utc),
         }
         
-        # Get additional info
         try:
             pub_key = certificate.public_key()
             result['key_size'] = str(pub_key.key_size)
@@ -286,7 +240,7 @@ PYEND
                 if [[ "$JSON_MODE" == true ]]; then
                     JSON_OUTPUT="\"p12\": $P12_RESULT"
                 else
-                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"P12 OCSP: {d.get(\"status\", \"unknown\")} | {d.get(\"ocsp_url\", \"N/A\")}"); print(f"  Serial: {d.get(\"serial\", \"N/A\")}"); d.get("this_update") and print(f"  This Update: {d[\"this_update\"]}"); d.get("next_update") and print(f"  Next Update: {d[\"next_update\"]}"); d.get("revocation_time") and print(f"  Revocation Time: {d[\"revocation_time\"]}")'
+                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"P12 OCSP: {d.get(\"status\", \"unknown\")} | {d.get(\"ocsp_url\", \"N/A\")}"); print(f"  Serial: {d.get(\"serial\", \"N/A\")}"); d.get("this_update") and print(f"  This Update: {d[\"this_update\"]}"); d.get("next_update") and print(f"  Next Update: {d[\"next_update\"]}"); d.get("revocation_time") and print(f"  Revocation Time: {d[\"revocation_time\"]}"); d.get("revoked_by") and print(f"  Revoked By: {d[\"revoked_by\"]}")'
                 fi
             else
                 if [[ "$JSON_MODE" == true ]]; then
@@ -305,7 +259,7 @@ PYEND
             fi
         fi
     else
-        # Linux: Original approach
+        # Linux: Use original OpenSSL approach
         openssl pkcs12 -legacy -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null || \
         openssl pkcs12 -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null
         
