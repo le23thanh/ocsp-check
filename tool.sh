@@ -267,10 +267,10 @@ PYEND
         else
             # Check if it's an error or success
             if echo "$P12_RESULT" | python3 -c "import sys, json; d=json.loads(sys.stdin.read()); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
-                if [[ "$TYPE" == "ocsp" ]]; then
-                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"P12 OCSP: {d.get(\"status\", \"unknown\")} | {d.get(\"ocsp_url\", \"N/A\")}"); print(f"  Serial: {d.get(\"serial\", \"N/A\")}"); d.get("this_update") and print(f"  This Update: {d[\"this_update\"]}"); d.get("next_update") and print(f"  Next Update: {d[\"next_update\"]}"); d.get("revocation_time") and print(f"  Revocation Time: {d[\"revocation_time\"]}"); d.get("revoked_by") and print(f"  Revoked By: {d[\"revoked_by\"]}")'
+              if [[ "$TYPE" == "ocsp" ]]; then
+                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print("P12 OCSP:", d.get("status", "unknown"), "|", d.get("ocsp_url", "N/A")); print("  Serial:", d.get("serial", "N/A")); d.get("this_update") and print("  This Update:", d["this_update"]); d.get("next_update") and print("  Next Update:", d["next_update"]); d.get("revocation_time") and print("  Revocation Time:", d["revocation_time"]); d.get("revoked_by") and print("  Revoked By:", d["revoked_by"])'
                 else
-                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(k + ":", v) for k, v in d.items()]'
                 fi
            else
                 echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print("Error:", d.get("error", "Unknown error"))'
@@ -525,4 +525,4 @@ if [[ "$JSON_MODE" == true ]]; then
 fi
 
 # Cleanup
-rm -rf "$RANDOM_FOLDER" 
+rm -rf "$RANDOM_FOLDER"
