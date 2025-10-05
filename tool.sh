@@ -32,32 +32,302 @@ done
 RANDOM_FOLDER="certificates/$(openssl rand -hex 8)"
 mkdir -p "$RANDOM_FOLDER"
 
+# Detect if running on macOS
+IS_MACOS=false
+if [[ "$(uname)" == "Darwin" ]]; then
+    IS_MACOS=true
+fi
+
 # Collect all JSON outputs in a temporary file if in JSON mode
 JSON_OUTPUT=""
 
-if [[ -n "$P12_FILE" && -f "$P12_FILE" ]]; then
-    openssl pkcs12 -legacy -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null || \
-    openssl pkcs12 -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null
+# Function to determine revocation reason/source
+get_revocation_info() {
+    local ocsp_output=$1
+    local revocation_reason=""
+    local revoked_by="Unknown"
     
-    if [[ "$TYPE" == "ocsp" ]]; then
-        OCSP_URL=$(openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -ocsp_uri)
-        curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer"
-        openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem"
+    if echo "$ocsp_output" | grep -q "Revocation Reason:"; then
+        revocation_reason=$(echo "$ocsp_output" | grep "Revocation Reason:" | sed 's/.*Revocation Reason: //')
         
-        OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/p12.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
-        STATUS=$(echo "$OCSP_OUTPUT" | grep -o "p12.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
-        THIS_UPDATE=$(echo "$OCSP_OUTPUT" | grep "This Update:" | sed 's/.*This Update: //')
-        NEXT_UPDATE=$(echo "$OCSP_OUTPUT" | grep "Next Update:" | sed 's/.*Next Update: //')
+        case "$revocation_reason" in
+            *"keyCompromise"*|*"Key Compromise"*)
+                revoked_by="Certificate holder (key compromised)"
+                ;;
+            *"cessationOfOperation"*|*"Cessation"*)
+                revoked_by="Certificate holder (ceased operations)"
+                ;;
+            *"superseded"*|*"Superseded"*)
+                revoked_by="Certificate holder (superseded by new certificate)"
+                ;;
+            *"affiliationChanged"*|*"Affiliation"*)
+                revoked_by="Apple (affiliation changed)"
+                ;;
+            *"certificateHold"*|*"Certificate Hold"*)
+                revoked_by="Apple (temporary hold)"
+                ;;
+            *"privilegeWithdrawn"*|*"Privilege Withdrawn"*)
+                revoked_by="Apple (privileges withdrawn)"
+                ;;
+            *)
+                revoked_by="Apple or certificate holder"
+                ;;
+        esac
+    elif echo "$ocsp_output" | grep -q "revoked"; then
+        revoked_by="Apple or certificate holder (reason not specified)"
+    fi
+    
+    echo "$revoked_by"
+}
+
+if [[ -n "$P12_FILE" && -f "$P12_FILE" ]]; then
+    if [[ "$IS_MACOS" == true ]]; then
+        # macOS: Use Python to extract and check OCSP
+        cat > "$RANDOM_FOLDER/check_p12.py" << 'PYEND'
+import sys
+import subprocess
+import json
+import warnings
+warnings.filterwarnings('ignore')
+
+from cryptography.hazmat.primitives.serialization import pkcs12, Encoding
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import ExtensionOID, AuthorityInformationAccessOID
+import tempfile
+import os
+
+def get_ocsp_url(cert):
+    try:
+        aia = cert.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
+        for desc in aia.value:
+            if desc.access_method == AuthorityInformationAccessOID.OCSP:
+                return desc.access_location.value
+    except:
+        pass
+    return None
+
+def get_issuer_url(cert):
+    try:
+        aia = cert.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
+        for desc in aia.value:
+            if desc.access_method == AuthorityInformationAccessOID.CA_ISSUERS:
+                return desc.access_location.value
+    except:
+        pass
+    return None
+
+def check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex):
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as cert_file:
+        cert_file.write(cert_pem)
+        cert_path = cert_file.name
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as issuer_file:
+        issuer_file.write(issuer_pem)
+        issuer_path = issuer_file.name
+    
+    try:
+        # Try with serial number first
+        result = subprocess.run(
+            ['openssl', 'ocsp', '-issuer', issuer_path, '-serial', f'0x{serial_hex}', 
+             '-url', ocsp_url, '-CAfile', issuer_path, '-no_nonce'],
+            capture_output=True, text=True, timeout=10
+        )
         
-        if [[ "$JSON_MODE" == true ]]; then
-            JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
+        output = result.stdout + result.stderr
+        
+        if 'good' in output.lower():
+            status = 'good'
+        elif 'revoked' in output.lower():
+            status = 'revoked'
+        else:
+            status = 'unknown'
+        
+        # Extract timestamps
+        this_update = ''
+        next_update = ''
+        revoked_time = ''
+        
+        for line in output.split('\n'):
+            if 'This Update:' in line:
+                this_update = line.split('This Update:')[1].strip()
+            elif 'Next Update:' in line:
+                next_update = line.split('Next Update:')[1].strip()
+            elif 'Revocation Time:' in line:
+                revoked_time = line.split('Revocation Time:')[1].strip()
+        
+        return {
+            'status': status,
+            'this_update': this_update,
+            'next_update': next_update,
+            'revoked_time': revoked_time,
+            'raw_output': output
+        }
+    finally:
+        os.unlink(cert_path)
+        os.unlink(issuer_path)
+
+try:
+    p12_file = sys.argv[1]
+    password = sys.argv[2].encode() if len(sys.argv) > 2 and sys.argv[2] else b''
+    check_type = sys.argv[3] if len(sys.argv) > 3 else 'ocsp'
+    
+    with open(p12_file, 'rb') as f:
+        p12_data = f.read()
+    
+    private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
+        p12_data, password, default_backend()
+    )
+    
+    if not certificate:
+        print(json.dumps({'error': 'No certificate found in P12 file'}))
+        sys.exit(1)
+    
+    cert_pem = certificate.public_bytes(Encoding.PEM).decode('utf-8')
+    serial_hex = format(certificate.serial_number, 'x')
+    
+    if check_type == 'ocsp':
+        ocsp_url = get_ocsp_url(certificate)
+        if not ocsp_url:
+            print(json.dumps({'error': 'No OCSP URL found in certificate'}))
+            sys.exit(1)
+        
+        issuer_url = get_issuer_url(certificate)
+        if not issuer_url:
+            print(json.dumps({'error': 'No issuer URL found in certificate'}))
+            sys.exit(1)
+        
+        # Download issuer certificate
+        import urllib.request
+        issuer_der = urllib.request.urlopen(issuer_url).read()
+        issuer_cert = x509.load_der_x509_certificate(issuer_der, default_backend())
+        issuer_pem = issuer_cert.public_bytes(Encoding.PEM).decode('utf-8')
+        
+        # Check OCSP
+        ocsp_result = check_ocsp(cert_pem, issuer_pem, ocsp_url, serial_hex)
+        
+        result = {
+            'ocsp_url': ocsp_url,
+            'status': ocsp_result['status'],
+            'serial': serial_hex,
+            'this_update': ocsp_result['this_update'],
+            'next_update': ocsp_result['next_update']
+        }
+        
+        if ocsp_result['revoked_time']:
+            result['revocation_time'] = ocsp_result['revoked_time']
+        
+        # Determine who revoked the certificate
+        if ocsp_result['status'] == 'revoked':
+            raw_output = ocsp_result['raw_output']
+            revoked_by = "Unknown"
+            
+            if 'Revocation Reason:' in raw_output:
+                if 'keyCompromise' in raw_output or 'Key Compromise' in raw_output:
+                    revoked_by = "Certificate holder (key compromised)"
+                elif 'cessationOfOperation' in raw_output or 'Cessation' in raw_output:
+                    revoked_by = "Certificate holder (ceased operations)"
+                elif 'superseded' in raw_output or 'Superseded' in raw_output:
+                    revoked_by = "Certificate holder (superseded by new certificate)"
+                elif 'affiliationChanged' in raw_output or 'Affiliation' in raw_output:
+                    revoked_by = "Apple (affiliation changed)"
+                elif 'certificateHold' in raw_output or 'Certificate Hold' in raw_output:
+                    revoked_by = "Apple (temporary hold)"
+                elif 'privilegeWithdrawn' in raw_output or 'Privilege Withdrawn' in raw_output:
+                    revoked_by = "Apple (privileges withdrawn)"
+                else:
+                    revoked_by = "Apple or certificate holder"
+            else:
+                revoked_by = "Apple or certificate holder (reason not specified)"
+            
+            result['revoked_by'] = revoked_by
+        
+        print(json.dumps(result))
+    else:
+        # Info mode
+        subject_dict = {}
+        for attr in certificate.subject:
+            key = attr.oid._name.lower().replace(' ', '_')
+            subject_dict[key] = attr.value
+        
+        issuer_str = ', '.join([f"{attr.oid._name}={attr.value}" for attr in certificate.issuer])
+        
+        result = {
+            **subject_dict,
+            'issuer': issuer_str,
+            'serial': serial_hex,
+            'not_before': str(certificate.not_valid_before_utc),
+            'not_after': str(certificate.not_valid_after_utc),
+        }
+        
+        # Get additional info
+        try:
+            pub_key = certificate.public_key()
+            result['key_size'] = str(pub_key.key_size)
+        except:
+            pass
+        
+        try:
+            result['signature_algorithm'] = certificate.signature_algorithm_oid._name
+        except:
+            pass
+        
+        print(json.dumps(result))
+        
+except Exception as e:
+    print(json.dumps({'error': str(e)}))
+    sys.exit(1)
+PYEND
+
+        if [[ "$TYPE" == "ocsp" ]]; then
+            P12_RESULT=$(python3 "$RANDOM_FOLDER/check_p12.py" "$P12_FILE" "$PASSWORD" "ocsp" 2>&1)
+            
+            if echo "$P12_RESULT" | python3 -c "import sys, json; d=json.loads(sys.stdin.read()); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
+                if [[ "$JSON_MODE" == true ]]; then
+                    JSON_OUTPUT="\"p12\": $P12_RESULT"
+                else
+                    echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); print(f"P12 OCSP: {d.get(\"status\", \"unknown\")} | {d.get(\"ocsp_url\", \"N/A\")}"); print(f"  Serial: {d.get(\"serial\", \"N/A\")}"); d.get("this_update") and print(f"  This Update: {d[\"this_update\"]}"); d.get("next_update") and print(f"  Next Update: {d[\"next_update\"]}"); d.get("revocation_time") and print(f"  Revocation Time: {d[\"revocation_time\"]}")'
+                fi
+            else
+                if [[ "$JSON_MODE" == true ]]; then
+                    JSON_OUTPUT="\"p12\": $P12_RESULT"
+                else
+                    echo "Error: $P12_RESULT"
+                fi
+            fi
         else
-            echo "P12 OCSP: $STATUS | $OCSP_URL"
+            P12_RESULT=$(python3 "$RANDOM_FOLDER/check_p12.py" "$P12_FILE" "$PASSWORD" "info" 2>&1)
+            
+            if [[ "$JSON_MODE" == true ]]; then
+                JSON_OUTPUT="\"p12\": $P12_RESULT"
+            else
+                echo "$P12_RESULT" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+            fi
         fi
     else
-        openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -text > "$RANDOM_FOLDER/p12_full.txt"
+        # Linux: Original approach
+        openssl pkcs12 -legacy -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null || \
+        openssl pkcs12 -in "$P12_FILE" -clcerts -nokeys -out "$RANDOM_FOLDER/p12.pem" -passin "pass:$PASSWORD" 2>/dev/null
         
-        cat > "$RANDOM_FOLDER/parse_cert.py" << 'PYEND'
+        if [[ "$TYPE" == "ocsp" ]]; then
+            OCSP_URL=$(openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -ocsp_uri)
+            curl -s -o "$RANDOM_FOLDER/issuer.cer" "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer"
+            openssl x509 -inform DER -in "$RANDOM_FOLDER/issuer.cer" -out "$RANDOM_FOLDER/issuer.pem"
+            
+            OCSP_OUTPUT=$(openssl ocsp -issuer "$RANDOM_FOLDER/issuer.pem" -cert "$RANDOM_FOLDER/p12.pem" -url "$OCSP_URL" -CAfile "$RANDOM_FOLDER/issuer.pem" -noverify 2>&1 || true)
+            STATUS=$(echo "$OCSP_OUTPUT" | grep -o "p12.pem: [a-z]*" | awk '{print $2}' || echo "unknown")
+            THIS_UPDATE=$(echo "$OCSP_OUTPUT" | grep "This Update:" | sed 's/.*This Update: //')
+            NEXT_UPDATE=$(echo "$OCSP_OUTPUT" | grep "Next Update:" | sed 's/.*Next Update: //')
+            
+            if [[ "$JSON_MODE" == true ]]; then
+                JSON_OUTPUT="\"p12\": {\"ocsp_url\": \"$OCSP_URL\", \"status\": \"$STATUS\", \"this_update\": \"$THIS_UPDATE\", \"next_update\": \"$NEXT_UPDATE\"}"
+            else
+                echo "P12 OCSP: $STATUS | $OCSP_URL"
+            fi
+        else
+            openssl x509 -in "$RANDOM_FOLDER/p12.pem" -noout -text > "$RANDOM_FOLDER/p12_full.txt"
+            
+            cat > "$RANDOM_FOLDER/parse_cert.py" << 'PYEND'
 import re
 import json
 import sys
@@ -108,16 +378,16 @@ ext_key_usage = re.search(r'X509v3 Extended Key Usage:.*?\n\s+(.+)', cert_text)
 if ext_key_usage:
     data['extended_key_usage'] = ext_key_usage.group(1).strip()
 
-# Output only the inner data object as JSON for bash to assemble
 print(json.dumps(data))
 PYEND
 
-        P12_DATA=$(python3 "$RANDOM_FOLDER/parse_cert.py" "$RANDOM_FOLDER/p12_full.txt")
-        
-        if [[ "$JSON_MODE" == true ]]; then
-            JSON_OUTPUT="\"p12\": $P12_DATA"
-        else
-            echo "$P12_DATA" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+            P12_DATA=$(python3 "$RANDOM_FOLDER/parse_cert.py" "$RANDOM_FOLDER/p12_full.txt")
+            
+            if [[ "$JSON_MODE" == true ]]; then
+                JSON_OUTPUT="\"p12\": $P12_DATA"
+            else
+                echo "$P12_DATA" | python3 -c 'import sys, json; d = json.load(sys.stdin); [print(f"{k}: {v}") for k, v in d.items()]'
+            fi
         fi
     fi
 fi
@@ -174,7 +444,6 @@ for key, value in plist.items():
             if isinstance(v, (str, int, bool)):
                 data[sub_key] = v
 
-# Output only the inner data object as JSON for bash to assemble
 print(json.dumps(data, default=str))
 PYEND
 

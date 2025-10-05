@@ -23,25 +23,26 @@ ___
 
 ## Requirements:
 
-- **OpenSSL & Python**
+- **OpenSSL & Python & Cryptography Library**
   
-> `sudo apt install openssl python3` (Debian/Ubuntu)
+> `sudo apt install openssl python3 python3-cryptography` (Debian/Ubuntu)
 >
-> `sudo dnf install openssl python3` (Fedora)
+> `sudo dnf install openssl python3 python3-cryptography` (Fedora)
 >
-> `sudo yum install openssl python3` (CentOS/RHEL 7)
+> `sudo yum install openssl python3 python3-cryptography` (CentOS/RHEL 7)
 >
-> `sudo dnf install openssl python3` (CentOS/RHEL 8+)
+> `sudo dnf install openssl python3 python3-cryptography` (CentOS/RHEL 8+)
 >
-> `sudo pacman -Syu openssl python --noconfirm` (Arch Linux)
+> `sudo pacman -Syu openssl python python-cryptography --noconfirm` (Arch Linux)
 >
-> `sudo zypper install openssl python3` (openSUSE)
+> `sudo zypper install openssl python3 python3-cryptography` (openSUSE)
 >
-> `brew install openssl python`(MacOS)
+> `brew install openssl python && pip3 install cryptography` (macOS)
 >
-> `apk add openssl python3` (Alpine Linux (ISH App on iOS))
+> `apk add openssl python3 py3-cryptography` (Alpine Linux / iSH on iOS)
 >
-> `pkg install openssl python` (Termux App Android)
+> `pkg install openssl python && pip install cryptography` (Termux App on Android)
+
 
 
 ## Installing:
