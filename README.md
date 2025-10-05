@@ -28,6 +28,8 @@ ___
 >
 > `sudo zypper install openssl python3` (openSUSE)
 >
+> `brew install openssl python`(MacOS)
+>
 > `apk add openssl python3` (Alpine Linux (ISH App on iOS))
 >
 > `pkg install openssl python` (Termux App Android)
